@@ -65,11 +65,11 @@ if not st.session_state.get("autenticado"):
         st.rerun()
 
 if not st.session_state.get("autenticado"):
-    # JS silencioso: revisa localStorage y redirige si hay token guardado
+    # JS silencioso: revisa localStorage del PARENT y redirige si hay token guardado
     _components.html(f"""<script>
     (function(){{
         try {{
-            var t = localStorage.getItem('{_LS_KEY}');
+            var t = window.parent.localStorage.getItem('{_LS_KEY}');
             if (t && t === '{_EXPECTED}') {{
                 var u = new URL(window.parent.location.href);
                 if (!u.searchParams.get('_oa')) {{
@@ -95,11 +95,46 @@ if not st.session_state.get("autenticado"):
             st.error("Contraseña incorrecta.")
     st.stop()
 
-# Guardar token en localStorage tras login exitoso con "Recordar sesión"
+# Guardar token en localStorage del PARENT tras login exitoso con "Recordar sesión"
 if st.session_state.pop("_guardar_ls", False):
     _components.html(f"""<script>
-    try {{ localStorage.setItem('{_LS_KEY}', '{_EXPECTED}'); }} catch(e) {{}}
+    try {{ window.parent.localStorage.setItem('{_LS_KEY}', '{_EXPECTED}'); }} catch(e) {{}}
     </script>""", height=1)
+
+# Inyectar botón flotante para abrir/cerrar sidebar (JS real — CSS no funciona en stToolbar)
+_components.html("""<script>
+(function(){
+    var p = window.parent.document;
+    if (p.getElementById('oak-sb-btn')) return;
+    var btn = p.createElement('button');
+    btn.id = 'oak-sb-btn';
+    btn.title = 'Abrir / cerrar barra lateral';
+    btn.innerHTML = '&#9776;';
+    btn.style.cssText = [
+        'position:fixed','top:10px','left:10px','z-index:2147483647',
+        'width:38px','height:38px','background:#C8A951','color:#0D1B2A',
+        'border:none','border-radius:8px','font-size:20px','font-weight:bold',
+        'cursor:pointer','display:flex','align-items:center','justify-content:center',
+        'box-shadow:0 2px 10px rgba(200,169,81,.5)','transition:background .2s'
+    ].join(';');
+    btn.onmouseenter = function(){ btn.style.background='#D4B564'; };
+    btn.onmouseleave = function(){ btn.style.background='#C8A951'; };
+    btn.onclick = function(){
+        var selectors = [
+            '[data-testid="collapsedControl"]',
+            '[data-testid="stSidebarCollapseButton"] button',
+            '[data-testid="stSidebarCollapseButton"]',
+            'button[aria-label*="sidebar" i]',
+            'button[aria-label*="Sidebar"]'
+        ];
+        for (var i = 0; i < selectors.length; i++) {
+            var el = p.querySelector(selectors[i]);
+            if (el) { el.click(); return; }
+        }
+    };
+    p.body.appendChild(btn);
+})();
+</script>""", height=1)
 
 st.markdown("""
 <style>
