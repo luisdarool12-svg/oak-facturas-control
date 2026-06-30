@@ -1,3 +1,6 @@
+[ui]
+hideTopBar = true
+
 [theme]
 base = "light"
 primaryColor = "#C8A951"          # dorado (foco, links, sliders)
