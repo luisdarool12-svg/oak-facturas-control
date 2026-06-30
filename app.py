@@ -118,12 +118,14 @@ st.markdown("""
 }
 html,body,[class*="css"],.stApp{ font-family:'Inter',sans-serif; color:#CBD5E1; }
 .stApp{ background:#0B1520; }
-/* Ocultar toolbar/menú pero NO el botón de sidebar */
+/* Ocultar menú/toolbar pero NO el botón de sidebar */
 header[data-testid="stHeader"]{
   background:transparent !important;
-  height:auto !important;
+  height:3.75rem !important;
+  overflow:visible !important;
 }
-[data-testid="stToolbar"],
+/* Ocultar hijos del toolbar EXCEPTO el collapsedControl */
+[data-testid="stToolbar"] > *:not([data-testid="collapsedControl"]){ display:none !important; }
 [data-testid="stStatusWidget"],
 [data-testid="stDecoration"]{ display:none !important; }
 #MainMenu{ display:none !important; }
@@ -133,14 +135,16 @@ header[data-testid="stHeader"]{
 section[data-testid="stSidebar"]{ background:#0D1B2A; border-right:1px solid var(--oak-line); }
 section[data-testid="stSidebar"] > div > div > div{ padding-top:20px !important; }
 
-/* ── Botón abrir/cerrar sidebar (siempre visible) ── */
+/* ── Botón abrir/cerrar sidebar ── */
 [data-testid="collapsedControl"]{
   display:flex !important;
+  visibility:visible !important;
+  opacity:1 !important;
   align-items:center !important;
   justify-content:center !important;
   position:fixed !important;
   top:10px !important; left:10px !important;
-  z-index:999999 !important;
+  z-index:2147483647 !important;
   background:var(--oak-gold) !important;
   border-radius:8px !important;
   width:38px !important; height:38px !important;
