@@ -9,7 +9,7 @@ Iniciar:
 import streamlit as st
 import pandas as pd
 import hashlib
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta
 from parsers.ofb_parser   import parse_ofb
 from parsers.cfdi_parser  import parse_zip
 from parsers.sisor_parser import parse_sisor
@@ -52,29 +52,47 @@ st.set_page_config(
 
 # ─── Login ────────────────────────────────────────────────────────────────────
 
-import extra_streamlit_components as stx
+import streamlit.components.v1 as _components
 
-def _token(pwd: str) -> str:
-    return hashlib.sha256(pwd.encode()).hexdigest()
-
-cookie_manager = stx.CookieManager(key="oak_cm")
+_LS_KEY   = "oak_facturas_auth_v1"
+_EXPECTED = hashlib.sha256(st.secrets.get("APP_PASSWORD", "").encode()).hexdigest()
 
 if not st.session_state.get("autenticado"):
-    _cookie = cookie_manager.get("oak_auth")
-    _expected = _token(st.secrets.get("APP_PASSWORD", ""))
-    if _cookie == _expected:
+    # Si el navegador tiene el token en localStorage, llega via query param
+    _qp_token = st.query_params.get("_oa", "")
+    if _qp_token == _EXPECTED:
         st.session_state["autenticado"] = True
+        st.query_params.clear()
+        st.rerun()
     else:
+        # JS: revisa localStorage y redirige con token si está guardado
+        _components.html(f"""<script>
+        var t = localStorage.getItem('{_LS_KEY}');
+        if (t === '{_EXPECTED}') {{
+            var u = new URL(window.parent.location.href);
+            if (!u.searchParams.get('_oa')) {{
+                u.searchParams.set('_oa', t);
+                window.parent.location.replace(u.toString());
+            }}
+        }}
+        </script>""", height=0)
+
         st.markdown("## 🔒 Control de Facturas · OAK Footwear")
-        pwd = st.text_input("Contraseña", type="password")
-        recordar = st.checkbox("Recordar sesión (30 días)")
+        _pwd = st.text_input("Contraseña", type="password")
+        _recordar = st.checkbox("Recordar sesión (30 días)", value=True)
         if st.button("Entrar", type="primary"):
-            if pwd == st.secrets.get("APP_PASSWORD", ""):
-                st.session_state["autenticado"] = True
-                if recordar:
-                    expires = datetime.now() + timedelta(days=30)
-                    cookie_manager.set("oak_auth", _token(pwd), expires_at=expires)
-                st.rerun()
+            if _pwd == st.secrets.get("APP_PASSWORD", ""):
+                if _recordar:
+                    # Guarda en localStorage y redirige (la redirección autentica)
+                    _components.html(f"""<script>
+                    localStorage.setItem('{_LS_KEY}', '{_EXPECTED}');
+                    var u = new URL(window.parent.location.href);
+                    u.searchParams.set('_oa', '{_EXPECTED}');
+                    window.parent.location.replace(u.toString());
+                    </script>""", height=0)
+                else:
+                    st.session_state["autenticado"] = True
+                    st.rerun()
             else:
                 st.error("Contraseña incorrecta.")
         st.stop()
@@ -96,7 +114,14 @@ st.markdown("""
 }
 html,body,[class*="css"],.stApp{ font-family:'Inter',sans-serif; color:#CBD5E1; }
 .stApp{ background:#0B1520; }
-header[data-testid="stHeader"]{ display:none !important; }
+/* Ocultar toolbar/menú pero NO el botón de sidebar */
+header[data-testid="stHeader"]{
+  background:transparent !important;
+  height:auto !important;
+}
+[data-testid="stToolbar"],
+[data-testid="stStatusWidget"],
+[data-testid="stDecoration"]{ display:none !important; }
 #MainMenu{ display:none !important; }
 .block-container{ padding-top:0 !important; max-width:1640px; }
 
@@ -104,22 +129,27 @@ header[data-testid="stHeader"]{ display:none !important; }
 section[data-testid="stSidebar"]{ background:#0D1B2A; border-right:1px solid var(--oak-line); }
 section[data-testid="stSidebar"] > div > div > div{ padding-top:20px !important; }
 
-/* ── Botón abrir/cerrar sidebar ── */
+/* ── Botón abrir/cerrar sidebar (siempre visible) ── */
 [data-testid="collapsedControl"]{
+  display:flex !important;
+  align-items:center !important;
+  justify-content:center !important;
+  position:fixed !important;
+  top:10px !important; left:10px !important;
+  z-index:999999 !important;
   background:var(--oak-gold) !important;
   border-radius:8px !important;
-  padding:6px 10px !important;
-  margin:10px 0 0 6px !important;
+  width:38px !important; height:38px !important;
   box-shadow:0 2px 10px rgba(200,169,81,.45) !important;
   transition:background .2s,box-shadow .2s !important;
+  cursor:pointer !important;
 }
 [data-testid="collapsedControl"]:hover{
   background:var(--oak-gold-deep) !important;
   box-shadow:0 4px 16px rgba(200,169,81,.65) !important;
 }
 [data-testid="collapsedControl"] svg{
-  color:#0D1B2A !important;
-  fill:#0D1B2A !important;
+  color:#0D1B2A !important; fill:#0D1B2A !important;
   width:20px !important; height:20px !important;
 }
 
