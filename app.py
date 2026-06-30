@@ -9,6 +9,7 @@ Iniciar:
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
+from streamlit_cookies_controller import CookieController
 
 from parsers.ofb_parser   import parse_ofb
 from parsers.cfdi_parser  import parse_zip
@@ -52,16 +53,23 @@ st.set_page_config(
 
 # ─── Login ────────────────────────────────────────────────────────────────────
 
+_cookies = CookieController()
+_SESSION_HOURS = 8
+
 if not st.session_state.get("autenticado"):
-    st.markdown("## 🔒 Control de Facturas · OAK Footwear")
-    pwd = st.text_input("Contraseña", type="password")
-    if st.button("Entrar", type="primary"):
-        if pwd == st.secrets.get("APP_PASSWORD", ""):
-            st.session_state["autenticado"] = True
-            st.rerun()
-        else:
-            st.error("Contraseña incorrecta.")
-    st.stop()
+    if _cookies.get("oak_auth") == "ok":
+        st.session_state["autenticado"] = True
+    else:
+        st.markdown("## 🔒 Control de Facturas · OAK Footwear")
+        pwd = st.text_input("Contraseña", type="password")
+        if st.button("Entrar", type="primary"):
+            if pwd == st.secrets.get("APP_PASSWORD", ""):
+                _cookies.set("oak_auth", "ok", max_age=_SESSION_HOURS * 3600)
+                st.session_state["autenticado"] = True
+                st.rerun()
+            else:
+                st.error("Contraseña incorrecta.")
+        st.stop()
 
 st.markdown("""
 <style>
@@ -80,6 +88,8 @@ st.markdown("""
 }
 html,body,[class*="css"],.stApp{ font-family:'Inter',sans-serif; color:#CBD5E1; }
 .stApp{ background:#0B1520; }
+header[data-testid="stHeader"]{ display:none !important; }
+#MainMenu{ display:none !important; }
 .block-container{ padding-top:0 !important; max-width:1640px; }
 
 /* ── Sidebar ── */

@@ -7,3 +7,4 @@ xlrd>=2.0.0
 python-dotenv>=1.0.0
 plotly>=5.0.0
 supabase>=2.3.0
+streamlit-cookies-controller>=0.4.1
