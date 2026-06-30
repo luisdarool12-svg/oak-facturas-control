@@ -8,9 +8,8 @@ Iniciar:
 """
 import streamlit as st
 import pandas as pd
-from datetime import date, timedelta
-from streamlit_cookies_controller import CookieController
-
+import hashlib
+from datetime import date, timedelta, datetime
 from parsers.ofb_parser   import parse_ofb
 from parsers.cfdi_parser  import parse_zip
 from parsers.sisor_parser import parse_sisor
@@ -53,19 +52,28 @@ st.set_page_config(
 
 # ─── Login ────────────────────────────────────────────────────────────────────
 
-_cookies = CookieController()
-_SESSION_HOURS = 8
+import extra_streamlit_components as stx
+
+def _token(pwd: str) -> str:
+    return hashlib.sha256(pwd.encode()).hexdigest()
+
+cookie_manager = stx.CookieManager(key="oak_cm")
 
 if not st.session_state.get("autenticado"):
-    if _cookies.get("oak_auth") == "ok":
+    _cookie = cookie_manager.get("oak_auth")
+    _expected = _token(st.secrets.get("APP_PASSWORD", ""))
+    if _cookie == _expected:
         st.session_state["autenticado"] = True
     else:
         st.markdown("## 🔒 Control de Facturas · OAK Footwear")
         pwd = st.text_input("Contraseña", type="password")
+        recordar = st.checkbox("Recordar sesión (30 días)")
         if st.button("Entrar", type="primary"):
             if pwd == st.secrets.get("APP_PASSWORD", ""):
-                _cookies.set("oak_auth", "ok", max_age=_SESSION_HOURS * 3600)
                 st.session_state["autenticado"] = True
+                if recordar:
+                    expires = datetime.now() + timedelta(days=30)
+                    cookie_manager.set("oak_auth", _token(pwd), expires_at=expires)
                 st.rerun()
             else:
                 st.error("Contraseña incorrecta.")
@@ -356,32 +364,42 @@ with st.sidebar:
         key="fuente_sat",
     )
     if fuente_sat == "Excel OFB (recomendado)":
-        archivo_sat = st.file_uploader(
+        archivos_sat = st.file_uploader(
             "📊 Excel OFB del contador",
             type=["xlsx", "xls"],
             help="OFB211130F78_Recibidas-MM_YYYY-Facturas.xlsx",
             key="up_ofb",
+            accept_multiple_files=True,
         )
     else:
-        archivo_sat = st.file_uploader(
-            "📦 ZIP de XMLs (SAT)", type=["zip", "xml"], key="up_zip"
+        archivos_sat = st.file_uploader(
+            "📦 ZIP de XMLs (SAT)", type=["zip", "xml"], key="up_zip",
+            accept_multiple_files=True,
         )
 
-    if archivo_sat:
+    if archivos_sat:
         if st.button("⬆️ Cargar OFB a la DB", use_container_width=True):
             with st.spinner("Leyendo..."):
-                try:
-                    if fuente_sat == "Excel OFB (recomendado)":
-                        df_nuevo, _ = parse_ofb(archivo_sat.read(), archivo_sat.name)
-                    else:
-                        df_nuevo = parse_zip(archivo_sat.read())
-                    nuevas, existian = insertar_facturas_ofb(df_nuevo, archivo_sat.name)
-                    st.success(f"✅ {nuevas} nuevas · {existian} ya existían")
+                total_nuevas, total_existian = 0, 0
+                errores_ofb = []
+                for archivo_sat in archivos_sat:
+                    try:
+                        if fuente_sat == "Excel OFB (recomendado)":
+                            df_nuevo, _ = parse_ofb(archivo_sat.read(), archivo_sat.name)
+                        else:
+                            df_nuevo = parse_zip(archivo_sat.read())
+                        nuevas, existian = insertar_facturas_ofb(df_nuevo, archivo_sat.name)
+                        total_nuevas += nuevas
+                        total_existian += existian
+                    except Exception as e:
+                        errores_ofb.append(f"{archivo_sat.name}: {e}")
+                for err in errores_ofb:
+                    st.error(f"Error: {err}")
+                if total_nuevas > 0 or total_existian > 0:
+                    n_arch = len(archivos_sat) - len(errores_ofb)
+                    st.success(f"✅ {n_arch} archivo(s) · {total_nuevas} nuevas · {total_existian} ya existían")
                     st.session_state.resultado = None
                     st.rerun()
-                except Exception as e:
-                    st.error(f"Error cargando OFB: {e}")
-                    st.exception(e)
 
     st.divider()
 
@@ -398,35 +416,46 @@ with st.sidebar:
                 st.session_state.resultado = None
                 st.rerun()
 
-    archivo_sisor = st.file_uploader(
+    archivos_sisor = st.file_uploader(
         "📋 Excel de SISOR",
         type=["xlsx", "xls", "csv"],
         help="FACTURAS DD-MM-YYYY.XLS",
         key="up_sisor",
+        accept_multiple_files=True,
     )
-    if archivo_sisor:
+    if archivos_sisor:
         if st.button("⬆️ Cargar SISOR a la DB", use_container_width=True):
             with st.spinner("Leyendo..."):
-                try:
-                    df_s, _ = parse_sisor(archivo_sisor.read(), archivo_sisor.name)
-                    insertadas, omitidas, fechas_omitidas = insertar_sisor(df_s, archivo_sisor.name)
-                    st.success(f"✅ {insertadas} entradas nuevas cargadas")
-                    if omitidas > 0:
+                total_insertadas, total_omitidas = 0, 0
+                todas_fechas_omitidas = []
+                errores_sisor = []
+                for archivo_sisor in archivos_sisor:
+                    try:
+                        df_s, _ = parse_sisor(archivo_sisor.read(), archivo_sisor.name)
+                        insertadas, omitidas, fechas_omitidas = insertar_sisor(df_s, archivo_sisor.name)
+                        total_insertadas += insertadas
+                        total_omitidas += omitidas
+                        todas_fechas_omitidas.extend(fechas_omitidas)
+                    except Exception as e:
+                        errores_sisor.append(f"{archivo_sisor.name}: {e}")
+                for err in errores_sisor:
+                    st.error(f"Error: {err}")
+                if total_insertadas > 0 or total_omitidas > 0:
+                    n_arch = len(archivos_sisor) - len(errores_sisor)
+                    st.success(f"✅ {n_arch} archivo(s) · {total_insertadas} entradas nuevas cargadas")
+                    if total_omitidas > 0:
                         fechas_str = ", ".join(
                             pd.to_datetime(f).strftime("%d/%m/%Y")
-                            for f in fechas_omitidas[:6]
+                            for f in todas_fechas_omitidas[:6]
                         )
-                        if len(fechas_omitidas) > 6:
-                            fechas_str += f" (+{len(fechas_omitidas) - 6} más)"
+                        if len(todas_fechas_omitidas) > 6:
+                            fechas_str += f" (+{len(todas_fechas_omitidas) - 6} más)"
                         st.info(
-                            f"ℹ️ {omitidas} registros omitidos — esos días ya estaban "
+                            f"ℹ️ {total_omitidas} registros omitidos — esos días ya estaban "
                             f"en la DB:\n{fechas_str}"
                         )
                     st.session_state.resultado = None
                     st.rerun()
-                except Exception as e:
-                    st.error(f"Error cargando SISOR: {e}")
-                    st.exception(e)
 
     st.divider()
 
@@ -904,7 +933,7 @@ if procesar or st.session_state.resultado:
                 return ""
 
             df_show = df_f[cols_show].rename(columns=labels)
-            styled = df_show.style.applymap(
+            styled = df_show.style.map(
                 _color_dias, subset=["Días pend."]
             ) if "Días pend." in df_show.columns else df_show
 
@@ -1580,9 +1609,9 @@ if procesar or st.session_state.resultado:
 
                     styled_det = df_show_det.style
                     if "Estado" in df_show_det.columns and not df_show_det.empty:
-                        styled_det = styled_det.applymap(_style_estado, subset=["Estado"])
+                        styled_det = styled_det.map(_style_estado, subset=["Estado"])
                     if "Días rest." in df_show_det.columns and not df_show_det.empty:
-                        styled_det = styled_det.applymap(_style_dias, subset=["Días rest."])
+                        styled_det = styled_det.map(_style_dias, subset=["Días rest."])
 
                     st.dataframe(
                         styled_det,
@@ -1753,7 +1782,7 @@ if procesar or st.session_state.resultado:
 
                     styled_cruce = df_show_cruce.style
                     if "CFDI en SAT" in df_show_cruce.columns and not df_show_cruce.empty:
-                        styled_cruce = styled_cruce.applymap(
+                        styled_cruce = styled_cruce.map(
                             _style_cfdi_status, subset=["CFDI en SAT"]
                         )
 
@@ -1930,9 +1959,9 @@ if procesar or st.session_state.resultado:
 
                     _styled_s = _df_show_s.style
                     if "Estado" in _df_show_s.columns and not _df_show_s.empty:
-                        _styled_s = _styled_s.applymap(_color_estado_s, subset=["Estado"])
+                        _styled_s = _styled_s.map(_color_estado_s, subset=["Estado"])
                     if "Diferencia $" in _df_show_s.columns and not _df_show_s.empty:
-                        _styled_s = _styled_s.applymap(_color_dif_s, subset=["Diferencia $"])
+                        _styled_s = _styled_s.map(_color_dif_s, subset=["Diferencia $"])
 
                     st.dataframe(
                         _styled_s,
