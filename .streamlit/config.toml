@@ -1,0 +1,7 @@
+[theme]
+base = "light"
+primaryColor = "#C8A951"          # dorado (foco, links, sliders)
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F7FA"
+textColor = "#1E293B"
+font = "sans serif"

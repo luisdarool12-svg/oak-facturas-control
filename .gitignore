@@ -1,0 +1,19 @@
+# Credenciales — NUNCA subir a git
+.env
+.streamlit/secrets.toml
+
+# Base de datos y logs — datos privados
+data/
+
+# Archivos de datos Excel/XLS — no son código
+*.xlsx
+*.xls
+*.csv
+*.zip
+*.xml
+
+# macOS
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
