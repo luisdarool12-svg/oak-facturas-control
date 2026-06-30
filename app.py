@@ -57,45 +57,49 @@ import streamlit.components.v1 as _components
 _LS_KEY   = "oak_facturas_auth_v1"
 _EXPECTED = hashlib.sha256(st.secrets.get("APP_PASSWORD", "").encode()).hexdigest()
 
+# Auto-login: si el navegador guardó el token, llega vía query param desde JS
 if not st.session_state.get("autenticado"):
-    # Si el navegador tiene el token en localStorage, llega via query param
-    _qp_token = st.query_params.get("_oa", "")
-    if _qp_token == _EXPECTED:
+    if st.query_params.get("_oa", "") == _EXPECTED:
         st.session_state["autenticado"] = True
         st.query_params.clear()
         st.rerun()
-    else:
-        # JS: revisa localStorage y redirige con token si está guardado
-        _components.html(f"""<script>
-        var t = localStorage.getItem('{_LS_KEY}');
-        if (t === '{_EXPECTED}') {{
-            var u = new URL(window.parent.location.href);
-            if (!u.searchParams.get('_oa')) {{
-                u.searchParams.set('_oa', t);
-                window.parent.location.replace(u.toString());
-            }}
-        }}
-        </script>""", height=0)
 
-        st.markdown("## 🔒 Control de Facturas · OAK Footwear")
-        _pwd = st.text_input("Contraseña", type="password")
-        _recordar = st.checkbox("Recordar sesión (30 días)", value=True)
-        if st.button("Entrar", type="primary"):
-            if _pwd == st.secrets.get("APP_PASSWORD", ""):
-                if _recordar:
-                    # Guarda en localStorage y redirige (la redirección autentica)
-                    _components.html(f"""<script>
-                    localStorage.setItem('{_LS_KEY}', '{_EXPECTED}');
-                    var u = new URL(window.parent.location.href);
-                    u.searchParams.set('_oa', '{_EXPECTED}');
+if not st.session_state.get("autenticado"):
+    # JS silencioso: revisa localStorage y redirige si hay token guardado
+    _components.html(f"""<script>
+    (function(){{
+        try {{
+            var t = localStorage.getItem('{_LS_KEY}');
+            if (t && t === '{_EXPECTED}') {{
+                var u = new URL(window.parent.location.href);
+                if (!u.searchParams.get('_oa')) {{
+                    u.searchParams.set('_oa', t);
                     window.parent.location.replace(u.toString());
-                    </script>""", height=0)
-                else:
-                    st.session_state["autenticado"] = True
-                    st.rerun()
-            else:
-                st.error("Contraseña incorrecta.")
-        st.stop()
+                }}
+            }}
+        }} catch(e) {{}}
+    }})();
+    </script>""", height=1)
+
+    st.markdown("## 🔒 Control de Facturas · OAK Footwear")
+    _pwd = st.text_input("Contraseña", type="password")
+    _recordar = st.checkbox("Recordar sesión (30 días)", value=False)
+    if st.button("Entrar", type="primary"):
+        if _pwd == st.secrets.get("APP_PASSWORD", ""):
+            st.session_state["autenticado"] = True
+            if _recordar:
+                # Marcar para guardar en localStorage DESPUÉS del rerun
+                st.session_state["_guardar_ls"] = True
+            st.rerun()
+        else:
+            st.error("Contraseña incorrecta.")
+    st.stop()
+
+# Guardar token en localStorage tras login exitoso con "Recordar sesión"
+if st.session_state.pop("_guardar_ls", False):
+    _components.html(f"""<script>
+    try {{ localStorage.setItem('{_LS_KEY}', '{_EXPECTED}'); }} catch(e) {{}}
+    </script>""", height=1)
 
 st.markdown("""
 <style>
