@@ -104,6 +104,25 @@ header[data-testid="stHeader"]{ display:none !important; }
 section[data-testid="stSidebar"]{ background:#0D1B2A; border-right:1px solid var(--oak-line); }
 section[data-testid="stSidebar"] > div > div > div{ padding-top:20px !important; }
 
+/* ── Botón abrir/cerrar sidebar ── */
+[data-testid="collapsedControl"]{
+  background:var(--oak-gold) !important;
+  border-radius:8px !important;
+  padding:6px 10px !important;
+  margin:10px 0 0 6px !important;
+  box-shadow:0 2px 10px rgba(200,169,81,.45) !important;
+  transition:background .2s,box-shadow .2s !important;
+}
+[data-testid="collapsedControl"]:hover{
+  background:var(--oak-gold-deep) !important;
+  box-shadow:0 4px 16px rgba(200,169,81,.65) !important;
+}
+[data-testid="collapsedControl"] svg{
+  color:#0D1B2A !important;
+  fill:#0D1B2A !important;
+  width:20px !important; height:20px !important;
+}
+
 /* ── Sidebar: texto visible en modo oscuro ── */
 section[data-testid="stSidebar"] [data-testid="stWidgetLabel"],
 section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
