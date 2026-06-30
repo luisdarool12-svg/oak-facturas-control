@@ -792,6 +792,56 @@ with st.sidebar:
             )
 
     st.divider()
+
+    # ── Navegación de módulos (árbol vertical estilo SISOR) ─────────────────────
+    st.markdown('<div class="oak-side-label">Módulos</div>', unsafe_allow_html=True)
+
+    NAV_GROUPS = [
+        ("conciliacion", "📁 Conciliación", [
+            ("pendientes", "🔴", "Pendientes"),
+            ("ok", "✅", "Ya en SISOR"),
+            ("proveedor", "🏢", "Por proveedor"),
+        ]),
+        ("sisor_compras", "📁 SISOR y Compras", [
+            ("vista_sisor", "📋", "Vista SISOR"),
+            ("oc", "📦", "Órdenes de Compra"),
+            ("actividad", "📅", "Actividad"),
+        ]),
+        ("reportes", "📁 Reportes", [
+            ("historial", "📊", "Historial"),
+            ("exportar", "📥", "Exportar"),
+        ]),
+        ("configuracion", "📁 Configuración", [
+            ("exclusiones", "⚙️", "Exclusiones"),
+            ("gestionar_ofb", "🗑️", "Gestionar OFB"),
+        ]),
+    ]
+
+    if "nav_modulo" not in st.session_state:
+        st.session_state["nav_modulo"] = "pendientes"
+    if "nav_expanded" not in st.session_state:
+        st.session_state["nav_expanded"] = {g[0]: True for g in NAV_GROUPS}
+
+    _IND = "    "
+    for gkey, glabel, items in NAV_GROUPS:
+        expanded = st.session_state["nav_expanded"].get(gkey, True)
+        arrow = "▾" if expanded else "▸"
+        if st.button(f"{arrow}  {glabel}", key=f"navgrp_{gkey}", use_container_width=True):
+            st.session_state["nav_expanded"][gkey] = not expanded
+            st.rerun()
+        if expanded:
+            for ikey, icon, label in items:
+                is_active = st.session_state["nav_modulo"] == ikey
+                if st.button(
+                    f"{_IND}{icon}  {label}",
+                    key=f"navitem_{ikey}",
+                    use_container_width=True,
+                    type="primary" if is_active else "secondary",
+                ):
+                    st.session_state["nav_modulo"] = ikey
+                    st.rerun()
+
+    st.divider()
     st.caption(f"Hoy: {date.today().strftime('%d/%m/%Y')}")
     st.caption("App local · Sin internet · Datos privados")
 
@@ -950,25 +1000,27 @@ if procesar or st.session_state.resultado:
 
     st.divider()
 
-    # ── Tabs ──────────────────────────────────────────────────────────────────
+    # ── Módulo activo (elegido en el árbol de navegación del sidebar) ──────────
 
-    (tab_pend, tab_ok, tab_prov, tab_sisor_v,
-     tab_export, tab_excl, tab_hist, tab_oc, tab_act, tab_gestionar) = st.tabs([
-        f"🔴 Pendientes ({n_pend})",
-        f"✅ Ya en SISOR ({n_ok})",
-        "🏢 Por proveedor",
-        "📋 Vista SISOR",
-        "📥 Exportar",
-        "⚙️ Exclusiones",
-        "📊 Historial",
-        "📦 Órdenes de Compra",
-        "📅 Actividad",
-        "🗑️ Gestionar OFB",
-    ])
+    _active = st.session_state.get("nav_modulo", "pendientes")
+
+    _NAV_TITLES = {
+        "pendientes":    f"🔴 Pendientes ({n_pend})",
+        "ok":            f"✅ Ya en SISOR ({n_ok})",
+        "proveedor":     "🏢 Por proveedor",
+        "vista_sisor":   "📋 Vista SISOR",
+        "exportar":      "📥 Exportar",
+        "exclusiones":   "⚙️ Exclusiones",
+        "historial":     "📊 Historial",
+        "oc":            "📦 Órdenes de Compra",
+        "actividad":     "📅 Actividad",
+        "gestionar_ofb": "🗑️ Gestionar OFB",
+    }
+    st.markdown(f"### {_NAV_TITLES.get(_active, '')}")
 
     # ── Tab Pendientes ────────────────────────────────────────────────────────
 
-    with tab_pend:
+    if _active == "pendientes":
         if pendientes.empty:
             st.success("¡Todo al corriente! Todas las facturas del OFB ya están en SISOR.")
         else:
@@ -1052,7 +1104,7 @@ if procesar or st.session_state.resultado:
 
     # ── Tab Ya en SISOR ───────────────────────────────────────────────────────
 
-    with tab_ok:
+    if _active == "ok":
         if en_sisor.empty:
             st.info("No hay facturas del OFB confirmadas en SISOR.")
         else:
@@ -1073,7 +1125,7 @@ if procesar or st.session_state.resultado:
 
     # ── Tab Por proveedor ─────────────────────────────────────────────────────
 
-    with tab_prov:
+    if _active == "proveedor":
         if "proveedor" not in df_ofb.columns:
             st.info("Sin datos de proveedor.")
         else:
@@ -1132,7 +1184,7 @@ if procesar or st.session_state.resultado:
 
     # ── Tab Vista SISOR ───────────────────────────────────────────────────────
 
-    with tab_sisor_v:
+    if _active == "vista_sisor":
         st.markdown(f"**{len(df_sisor)}** entradas de SISOR en la base de datos:")
         cols_s = [c for c in ["proveedor","factura","importe","fecha_factura","archivo_origen"]
                   if c in df_sisor.columns]
@@ -1144,7 +1196,7 @@ if procesar or st.session_state.resultado:
 
     # ── Tab Exportar ──────────────────────────────────────────────────────────
 
-    with tab_export:
+    if _active == "exportar":
         st.markdown("### Exportar reporte a Excel")
         st.markdown("Genera un Excel con **Facturas Pendientes**, **Ya en SISOR** y **Resumen**.")
 
@@ -1183,7 +1235,7 @@ if procesar or st.session_state.resultado:
 
     # ── Tab Exclusiones ───────────────────────────────────────────────────────
 
-    with tab_excl:
+    if _active == "exclusiones":
         st.markdown("### ⚙️ Proveedores excluidos del análisis")
         st.markdown(
             "Marca ✅ en la columna **Excluir** los proveedores que **no** son tuyos. "
@@ -1264,7 +1316,7 @@ if procesar or st.session_state.resultado:
 
     # ── Tab Historial ─────────────────────────────────────────────────────────
 
-    with tab_hist:
+    if _active == "historial":
         st.markdown("### 📊 Historial de comparaciones")
         hist_df = get_historial_runs(n=60)
 
@@ -1454,7 +1506,7 @@ if procesar or st.session_state.resultado:
 
     # ── Tab Órdenes de Compra ─────────────────────────────────────────────────
 
-    with tab_oc:
+    if _active == "oc":
         st.markdown("### 📦 Órdenes de Compra — Control de pendientes")
 
         df_oc_res = get_oc_resumen_proveedor()
@@ -2075,7 +2127,7 @@ if procesar or st.session_state.resultado:
 
     # ── Tab Actividad ─────────────────────────────────────────────────────────
 
-    with tab_act:
+    if _active == "actividad":
         st.markdown("### 📅 Actividad diaria y semanal")
 
         act_vista = st.radio(
@@ -2224,7 +2276,7 @@ if procesar or st.session_state.resultado:
 
     # ── Tab Gestionar OFB ────────────────────────────────────────────────────
 
-    with tab_gestionar:
+    if _active == "gestionar_ofb":
         st.markdown("### 🗑️ Eliminar facturas del OFB")
         st.info(
             "Usa esta pantalla para eliminar facturas timbradas que **no debes pagar** "
