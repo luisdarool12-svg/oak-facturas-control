@@ -122,6 +122,7 @@ def eliminar_facturas_ofb(ids: list) -> int:
     return len(ids)
 
 
+@st.cache_data(ttl=120)
 def get_facturas_ofb() -> pd.DataFrame:
     data = _fetch_all(_OFB)
     if not data:
@@ -185,9 +186,8 @@ def insertar_sisor(df: pd.DataFrame, archivo_origen: str) -> Tuple[int, int, lis
         })
 
     if records:
-        sb2 = _sb()
         for i in range(0, len(records), 500):
-            sb2.table(_SISOR).insert(records[i:i + 500]).execute()
+            sb.table(_SISOR).insert(records[i:i + 500]).execute()
 
     return len(records), omitidas, sorted(fechas_omitidas)
 
@@ -195,10 +195,11 @@ def insertar_sisor(df: pd.DataFrame, archivo_origen: str) -> Tuple[int, int, lis
 def limpiar_sisor() -> int:
     sb = _sb()
     count = sb.table(_SISOR).select("id", count="exact").limit(0).execute().count or 0
-    sb.table(_SISOR).delete().gt("id", 0).execute()
+    sb.table(_SISOR).delete().gte("id", 1).execute()
     return count
 
 
+@st.cache_data(ttl=120)
 def get_sisor_entradas() -> pd.DataFrame:
     data = _fetch_all(_SISOR)
     if not data:
@@ -260,6 +261,7 @@ def insertar_oc(df: pd.DataFrame, archivo_origen: str) -> Tuple[int, int]:
     return nuevas, actualizadas
 
 
+@st.cache_data(ttl=120)
 def get_oc_pendientes() -> pd.DataFrame:
     data = _fetch_all(_OC)
     if not data:
@@ -277,11 +279,13 @@ def get_oc_pendientes() -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+@st.cache_data(ttl=120)
 def get_oc_proveedores_todos() -> set:
     data = _fetch_all(_OC, "proveedor")
     return {str(r["proveedor"]).upper().strip() for r in data if r.get("proveedor")}
 
 
+@st.cache_data(ttl=120)
 def get_oc_total_proveedor() -> pd.DataFrame:
     data = _fetch_all(_OC)
     if not data:
@@ -299,6 +303,47 @@ def get_oc_total_proveedor() -> pd.DataFrame:
     return result
 
 
+def eliminar_oc(ids: list) -> int:
+    if not ids:
+        return 0
+    sb = _sb()
+    sb.table(_OC).delete().in_("id", ids).execute()
+    return len(ids)
+
+
+def marcar_oc_facturadas(ids: list) -> int:
+    if not ids:
+        return 0
+    sb = _sb()
+    # Fetch cantidad to keep facturado consistent
+    rows = sb.table(_OC).select("id,cantidad").in_("id", ids).execute()
+    for row in rows.data:
+        sb.table(_OC).update({
+            "pendiente": 0,
+            "facturado": row.get("cantidad") or 0,
+        }).eq("id", row["id"]).execute()
+    return len(ids)
+
+
+@st.cache_data(ttl=120)
+def get_oc_todos() -> pd.DataFrame:
+    data = _fetch_all(_OC)
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
+    cols_priority = ["id", "oc", "renglon", "fecha", "proveedor", "familia", "material",
+                     "cantidad", "facturado", "pendiente", "unidad", "costo", "total",
+                     "fecha_entrega", "motivo", "archivo_origen"]
+    df = df[[c for c in cols_priority if c in df.columns]]
+    for col in ["total", "pendiente", "costo", "cantidad", "facturado"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    if "pendiente" in df.columns and "costo" in df.columns:
+        df["monto_pendiente"] = (df["pendiente"] * df["costo"]).round(2)
+    return df.sort_values(["fecha", "oc", "renglon"], na_position="last").reset_index(drop=True)
+
+
+@st.cache_data(ttl=120)
 def get_oc_resumen_proveedor() -> pd.DataFrame:
     data = _fetch_all(_OC)
     if not data:
@@ -343,6 +388,7 @@ def registrar_run(stats: dict) -> None:
     }).execute()
 
 
+@st.cache_data(ttl=120)
 def get_historial_runs(n: int = 60) -> pd.DataFrame:
     data = _fetch_all(_RUNS)
     if not data:
@@ -359,6 +405,7 @@ def get_historial_runs(n: int = 60) -> pd.DataFrame:
 
 # ─── stats generales (sidebar) ───────────────────────────────────────────────
 
+@st.cache_data(ttl=120)
 def get_stats_db() -> Dict[str, Any]:
     sb = _sb()
 
@@ -370,11 +417,12 @@ def get_stats_db() -> Dict[str, Any]:
     n_oc_total     = len(oc_data)
     n_oc_pend      = sum(1 for r in oc_data if (r.get("pendiente") or 0) > 0)
 
-    # Última carga: max de fecha_carga entre las 3 tablas
+    # Última carga: 1 fila por tabla (no descarga todas las filas)
     cargas = []
     for t in [_OFB, _SISOR, _OC]:
-        rows = _fetch_all(t, "fecha_carga")
-        cargas.extend(r["fecha_carga"] for r in rows if r.get("fecha_carga"))
+        res = sb.table(t).select("fecha_carga").order("fecha_carga", desc=True).limit(1).execute()
+        if res.data and res.data[0].get("fecha_carga"):
+            cargas.append(res.data[0]["fecha_carga"])
 
     ultima_carga = None
     if cargas:
@@ -403,6 +451,7 @@ def _max_fecha_captura() -> Optional[str]:
     return max(fechas) if fechas else None
 
 
+@st.cache_data(ttl=120)
 def get_sisor_del_dia(fecha_str: Optional[str] = None) -> pd.DataFrame:
     if fecha_str is None:
         fecha_str = _max_fecha_captura()
@@ -422,6 +471,7 @@ def get_sisor_del_dia(fecha_str: Optional[str] = None) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+@st.cache_data(ttl=120)
 def get_oc_del_dia(fecha_str: Optional[str] = None) -> pd.DataFrame:
     if fecha_str is None:
         fecha_str = _max_fecha_captura()
@@ -446,6 +496,7 @@ def _get_lunes_de_semana(fecha_str: str) -> str:
     return (d - timedelta(days=d.weekday())).isoformat()
 
 
+@st.cache_data(ttl=120)
 def get_actividad_semanal(lunes_str: str) -> pd.DataFrame:
     lunes   = datetime.strptime(lunes_str, "%Y-%m-%d").date()
     dias    = [lunes + timedelta(days=i) for i in range(6)]
@@ -489,3 +540,263 @@ def get_actividad_semanal(lunes_str: str) -> pd.DataFrame:
         })
 
     return pd.DataFrame(rows)
+
+
+# ─── Reporte mensual ─────────────────────────────────────────────────────────
+
+_MESES_ES = {
+    "01": "Enero",    "02": "Febrero",  "03": "Marzo",     "04": "Abril",
+    "05": "Mayo",     "06": "Junio",    "07": "Julio",     "08": "Agosto",
+    "09": "Septiembre", "10": "Octubre", "11": "Noviembre", "12": "Diciembre",
+}
+
+
+def _fecha_a_anio_mes(raw: str) -> Optional[str]:
+    """Convierte una fecha (YYYY-MM-DD o DD-MM-YYYY o DD/MM/YYYY) a 'YYYY-MM'. Retorna None si no reconoce."""
+    s = (raw or "").strip()
+    if re.match(r"^\d{4}-\d{2}", s):
+        return s[:7]
+    m = re.match(r"^(\d{2})[-/](\d{2})[-/](\d{4})", s)
+    if m:
+        return f"{m.group(3)}-{m.group(2)}"
+    return None
+
+
+@st.cache_data(ttl=120)
+def get_meses_disponibles() -> list:
+    """Lista de (etiqueta, valor YYYY-MM) con datos en OC o SISOR, más reciente primero."""
+    oc_data  = _fetch_all(_OC,    "fecha")
+    sir_data = _fetch_all(_SISOR, "fecha_factura")
+    meses: set = set()
+    for r in oc_data:
+        f = _fecha_a_anio_mes(r.get("fecha") or "")
+        if f:
+            meses.add(f)
+    for r in sir_data:
+        f = _fecha_a_anio_mes(r.get("fecha_factura") or "")
+        if f:
+            meses.add(f)
+    result = []
+    for m in sorted(meses, reverse=True):
+        year, mon = m.split("-")
+        label = f"{_MESES_ES.get(mon, mon)} {year}"
+        result.append((label, m))
+    return result
+
+
+@st.cache_data(ttl=120)
+def get_oc_historial() -> pd.DataFrame:
+    """Historial completo de OCs (todas las fechas) para derivar familia por proveedor."""
+    data = _fetch_all(_OC)
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
+    if "total" in df.columns:
+        df["total"] = pd.to_numeric(df["total"], errors="coerce").fillna(0.0)
+    cols = [c for c in ["oc", "proveedor", "familia", "total"] if c in df.columns]
+    return df[cols] if cols else pd.DataFrame()
+
+
+@st.cache_data(ttl=120)
+def get_oc_del_mes(anio_mes: str) -> pd.DataFrame:
+    """OC colocadas en el mes indicado (YYYY-MM)."""
+    data = _fetch_all(_OC)
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
+    for col in ["total", "cantidad", "costo", "pendiente", "facturado"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    df["_mes"] = df["fecha"].fillna("").str[:7]
+    df = df[df["_mes"] == anio_mes].drop(columns=["_mes"])
+    cols = [c for c in [
+        "oc", "renglon", "fecha", "proveedor", "familia", "material",
+        "cantidad", "unidad", "costo", "moneda", "total", "pendiente",
+        "fecha_entrega", "pedido",
+    ] if c in df.columns]
+    if not df.empty:
+        return df[cols].sort_values(
+            [c for c in ["proveedor", "oc", "renglon"] if c in df.columns],
+            na_position="last",
+        ).reset_index(drop=True)
+    return pd.DataFrame(columns=cols)
+
+
+@st.cache_data(ttl=120)
+def get_recepcionadas_del_mes(anio_mes: str) -> pd.DataFrame:
+    """
+    Facturas recepcionadas en SISOR del mes indicado, cruzadas con OFB.
+    - Si SISOR tiene columna UUID: match exacto → columna match_xml=True.
+    - Fallback: merge por proveedor normalizado + monto ±2% → match_xml=True.
+    - Si no hay match posible: retorna entradas SISOR del mes con match_xml=False.
+    """
+    sisor_data = _fetch_all(_SISOR)
+    ofb_data   = _fetch_all(_OFB)
+
+    if not sisor_data:
+        return pd.DataFrame()
+
+    sisor = pd.DataFrame(sisor_data)
+    sisor["_mes"] = sisor["fecha_factura"].fillna("").apply(_fecha_a_anio_mes)
+    sisor = sisor[sisor["_mes"] == anio_mes].drop(columns=["_mes"])
+    if sisor.empty:
+        return pd.DataFrame()
+
+    sisor["importe_n"] = pd.to_numeric(sisor["importe"], errors="coerce").fillna(0.0)
+
+    if ofb_data:
+        ofb = pd.DataFrame(ofb_data)
+        ofb["total"] = pd.to_numeric(ofb["total"], errors="coerce").fillna(0.0)
+
+        # ── Intento 1: UUID exacto ────────────────────────────────────────────
+        if "uuid" in sisor.columns:
+            sisor["_uuid_up"] = sisor["uuid"].fillna("").str.upper().str.strip()
+            ofb["_uuid_up"]   = ofb["uuid"].fillna("").str.upper().str.strip()
+            s_uuid = sisor[sisor["_uuid_up"] != ""].copy()
+            if not s_uuid.empty:
+                cols_ofb = ["_uuid_up", "rfc_emisor", "folio", "total"]
+                matched = s_uuid.merge(
+                    ofb[cols_ofb].rename(columns={"total": "total_ofb"}),
+                    on="_uuid_up", how="inner",
+                )
+                if not matched.empty:
+                    matched["match_xml"] = True
+                    result_cols = [c for c in [
+                        "proveedor", "factura", "uuid", "rfc_emisor",
+                        "importe_n", "fecha_factura", "fecha_captura", "folio", "match_xml",
+                    ] if c in matched.columns]
+                    return matched[result_cols].rename(
+                        columns={"importe_n": "importe"}
+                    ).reset_index(drop=True)
+
+        # ── Intento 2: proveedor normalizado + monto ±2% ─────────────────────
+        sisor["_prov_n"] = sisor["proveedor"].fillna("").str.upper().str.strip()
+        ofb["_prov_n"]   = ofb["proveedor"].fillna("").str.upper().str.strip()
+        merged = sisor.merge(
+            ofb[["_prov_n", "uuid", "rfc_emisor", "folio", "total"]].rename(
+                columns={"total": "total_ofb", "uuid": "uuid_ofb"}
+            ),
+            on="_prov_n", how="inner",
+        )
+        if not merged.empty:
+            merged["_diff"] = (
+                (merged["importe_n"] - merged["total_ofb"]).abs()
+                / merged["total_ofb"].clip(lower=1)
+            )
+            matched = merged[merged["_diff"] <= 0.02].copy()
+            matched = matched.drop_duplicates(subset=["factura", "proveedor"])
+            if not matched.empty:
+                matched["match_xml"] = True
+                result_cols = [c for c in [
+                    "proveedor", "factura", "uuid_ofb", "rfc_emisor",
+                    "importe_n", "fecha_factura", "fecha_captura", "folio", "match_xml",
+                ] if c in matched.columns]
+                return matched[result_cols].rename(
+                    columns={"importe_n": "importe", "uuid_ofb": "uuid"}
+                ).reset_index(drop=True)
+
+    # ── Sin match: retorna SISOR del mes sin verificación XML ─────────────────
+    sisor["match_xml"] = False
+    result_cols = [c for c in [
+        "proveedor", "factura", "importe_n", "fecha_factura", "fecha_captura", "match_xml",
+    ] if c in sisor.columns]
+    return sisor[result_cols].rename(
+        columns={"importe_n": "importe"}
+    ).reset_index(drop=True)
+
+
+@st.cache_data(ttl=120)
+def get_pendientes_del_mes(anio_mes: str) -> pd.DataFrame:
+    """
+    Facturas timbradas en SAT (OFB) del mes indicado (YYYY-MM) que NO están en SISOR.
+    Usa la misma lógica de match que el comparador: UUID exacto primero, luego folio+monto ±2%.
+    """
+    ofb_data   = _fetch_all(_OFB)
+    sisor_data = _fetch_all(_SISOR)
+
+    if not ofb_data:
+        return pd.DataFrame()
+
+    ofb = pd.DataFrame(ofb_data)
+    ofb["total"]   = pd.to_numeric(ofb["total"], errors="coerce").fillna(0.0)
+    ofb["fecha"]   = pd.to_datetime(ofb["fecha"], errors="coerce")
+    ofb["_mes"]    = ofb["fecha"].dt.strftime("%Y-%m")
+    ofb_mes = ofb[ofb["_mes"] == anio_mes].drop(columns=["_mes"]).copy()
+
+    if ofb_mes.empty:
+        return pd.DataFrame()
+
+    if not sisor_data:
+        ofb_mes["dias_pendiente"] = (
+            pd.Timestamp(date.today()) - ofb_mes["fecha"]
+        ).dt.days.clip(lower=0)
+        return ofb_mes.reset_index(drop=True)
+
+    sisor = pd.DataFrame(sisor_data)
+
+    # Intento 1: UUID exacto
+    if "uuid" in sisor.columns and sisor["uuid"].notna().any():
+        uuids_sisor = set(
+            sisor["uuid"].dropna().astype(str).str.upper().str.strip()
+        )
+        if uuids_sisor:
+            mask = ofb_mes["uuid"].astype(str).str.upper().str.strip().isin(uuids_sisor)
+            pendientes = ofb_mes[~mask].copy()
+            pendientes["dias_pendiente"] = (
+                pd.Timestamp(date.today()) - pendientes["fecha"]
+            ).dt.days.clip(lower=0)
+            cols = [c for c in [
+                "proveedor", "rfc_emisor", "folio", "folio_num", "uuid",
+                "fecha", "total", "moneda", "dias_pendiente",
+            ] if c in pendientes.columns]
+            return pendientes[cols].sort_values("dias_pendiente", ascending=False).reset_index(drop=True)
+
+    # Intento 2: folio_num + monto ±2%
+    sisor["importe_n"] = pd.to_numeric(sisor.get("importe", sisor.get("importe_n", 0)), errors="coerce").fillna(0.0)
+    sisor_folios = sisor["factura"].fillna("").astype(str).str.strip().str.upper() if "factura" in sisor.columns else pd.Series(dtype=str)
+
+    matched_idx = set()
+    for idx, row in ofb_mes.iterrows():
+        folio_ofb = str(row.get("folio_num", "") or "").strip().upper()
+        monto_ofb = float(row["total"])
+        if not folio_ofb:
+            continue
+        folio_match = sisor_folios[sisor_folios == folio_ofb]
+        if folio_match.empty:
+            continue
+        for si in folio_match.index:
+            monto_s = float(sisor.at[si, "importe_n"])
+            if monto_s > 0 and abs(monto_ofb - monto_s) / monto_s <= 0.02:
+                matched_idx.add(idx)
+                break
+
+    pendientes = ofb_mes[~ofb_mes.index.isin(matched_idx)].copy()
+    pendientes["dias_pendiente"] = (
+        pd.Timestamp(date.today()) - pendientes["fecha"]
+    ).dt.days.clip(lower=0)
+    cols = [c for c in [
+        "proveedor", "rfc_emisor", "folio", "folio_num", "uuid",
+        "fecha", "total", "moneda", "dias_pendiente",
+    ] if c in pendientes.columns]
+    return pendientes[cols].sort_values("dias_pendiente", ascending=False).reset_index(drop=True)
+
+
+# ─── Invalidar caché tras escrituras ─────────────────────────────────────────
+
+def invalidar_cache() -> None:
+    get_facturas_ofb.clear()
+    get_sisor_entradas.clear()
+    get_oc_pendientes.clear()
+    get_oc_todos.clear()
+    get_oc_proveedores_todos.clear()
+    get_oc_total_proveedor.clear()
+    get_oc_resumen_proveedor.clear()
+    get_historial_runs.clear()
+    get_stats_db.clear()
+    get_sisor_del_dia.clear()
+    get_oc_del_dia.clear()
+    get_actividad_semanal.clear()
+    get_meses_disponibles.clear()
+    get_oc_del_mes.clear()
+    get_recepcionadas_del_mes.clear()
+    get_pendientes_del_mes.clear()

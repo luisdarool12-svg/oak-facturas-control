@@ -15,7 +15,7 @@ from parsers.cfdi_parser  import parse_zip
 from parsers.sisor_parser import parse_sisor
 from parsers.oc_parser    import parse_oc
 from comparator           import comparar
-from exporter             import generar_excel
+from exporter             import generar_excel, exportar_reporte_mensual
 from exclusion_manager    import cargar_exclusiones, guardar_exclusiones
 from email_reporter       import generar_html, enviar_reporte, guardar_html
 from database import (
@@ -25,9 +25,12 @@ from database import (
     insertar_sisor,
     limpiar_sisor,
     insertar_oc,
+    eliminar_oc,
+    marcar_oc_facturadas,
     get_facturas_ofb,
     get_sisor_entradas,
     get_oc_pendientes,
+    get_oc_todos,
     get_oc_resumen_proveedor,
     get_oc_proveedores_todos,
     get_oc_total_proveedor,
@@ -39,7 +42,28 @@ from database import (
     get_actividad_semanal,
     _get_lunes_de_semana,
     _max_fecha_captura,
+    invalidar_cache,
+    get_meses_disponibles,
+    get_oc_del_mes,
+    get_recepcionadas_del_mes,
+    get_pendientes_del_mes,
+    get_oc_historial,
 )
+from familia_classifier import (
+    cargar_familias_manuales,
+    guardar_familias_manuales,
+    construir_indice_oc,
+    familias_disponibles,
+    asignar_familia,
+    SIN_CLASIFICAR,
+)
+from utils import estado_entrega, dias_restantes
+import re
+import json
+import os
+import time
+import plotly.graph_objects as go
+import streamlit.components.v1 as _components
 
 # ─── Página ────────────────────────────────────────────────────────────────────
 
@@ -52,54 +76,47 @@ st.set_page_config(
 
 # ─── Login ────────────────────────────────────────────────────────────────────
 
-import streamlit.components.v1 as _components
+_TOKEN_FILE = os.path.expanduser("~/.oak_facturas_auth")
+_EXPECTED   = hashlib.sha256(st.secrets.get("APP_PASSWORD", "").encode()).hexdigest()
+_TOKEN_DAYS = 30
 
-_LS_KEY   = "oak_facturas_auth_v1"
-_EXPECTED = hashlib.sha256(st.secrets.get("APP_PASSWORD", "").encode()).hexdigest()
+def _token_valido() -> bool:
+    try:
+        with open(_TOKEN_FILE) as f:
+            d = json.load(f)
+        return d.get("token") == _EXPECTED and time.time() < d.get("expires", 0)
+    except Exception:
+        return False
 
-# Auto-login: si el navegador guardó el token, llega vía query param desde JS
+def _guardar_token():
+    try:
+        with open(_TOKEN_FILE, "w") as f:
+            json.dump({"token": _EXPECTED, "expires": time.time() + _TOKEN_DAYS * 86400}, f)
+    except Exception:
+        pass
+
+def _borrar_token():
+    try:
+        os.remove(_TOKEN_FILE)
+    except Exception:
+        pass
+
+if not st.session_state.get("autenticado") and _token_valido():
+    st.session_state["autenticado"] = True
+
 if not st.session_state.get("autenticado"):
-    if st.query_params.get("_oa", "") == _EXPECTED:
-        st.session_state["autenticado"] = True
-        st.query_params.clear()
-        st.rerun()
-
-if not st.session_state.get("autenticado"):
-    # JS silencioso: revisa localStorage del PARENT y redirige si hay token guardado
-    _components.html(f"""<script>
-    (function(){{
-        try {{
-            var t = window.parent.localStorage.getItem('{_LS_KEY}');
-            if (t && t === '{_EXPECTED}') {{
-                var u = new URL(window.parent.location.href);
-                if (!u.searchParams.get('_oa')) {{
-                    u.searchParams.set('_oa', t);
-                    window.parent.location.replace(u.toString());
-                }}
-            }}
-        }} catch(e) {{}}
-    }})();
-    </script>""", height=1)
-
     st.markdown("## 🔒 Control de Facturas · OAK Footwear")
     _pwd = st.text_input("Contraseña", type="password")
-    _recordar = st.checkbox("Recordar sesión (30 días)", value=False)
+    _recordar = st.checkbox("Recordar sesión (30 días)", value=True)
     if st.button("Entrar", type="primary"):
         if _pwd == st.secrets.get("APP_PASSWORD", ""):
             st.session_state["autenticado"] = True
             if _recordar:
-                # Marcar para guardar en localStorage DESPUÉS del rerun
-                st.session_state["_guardar_ls"] = True
+                _guardar_token()
             st.rerun()
         else:
             st.error("Contraseña incorrecta.")
     st.stop()
-
-# Guardar token en localStorage del PARENT tras login exitoso con "Recordar sesión"
-if st.session_state.pop("_guardar_ls", False):
-    _components.html(f"""<script>
-    try {{ window.parent.localStorage.setItem('{_LS_KEY}', '{_EXPECTED}'); }} catch(e) {{}}
-    </script>""", height=1)
 
 # Inyectar botón flotante para abrir/cerrar sidebar (JS real — CSS no funciona en stToolbar)
 _components.html("""<script>
@@ -362,6 +379,15 @@ p, li, span { color:#CBD5E1; }
 .oak-metric .mv small{ font-size:.85rem; font-weight:600; color:#64748B; letter-spacing:0; }
 .oak-metric .md{ font-size:.74rem; font-weight:600; color:#64748B; margin-top:10px;
   display:inline-flex; align-items:center; gap:4px; }
+
+/* ── Transición suave al cambiar de módulo ── */
+@keyframes oak-fade-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+section.main .block-container {
+  animation: oak-fade-in 0.22s ease-out both;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -490,6 +516,7 @@ with st.sidebar:
                 if total_nuevas > 0 or total_existian > 0:
                     n_arch = len(archivos_sat) - len(errores_ofb)
                     st.success(f"✅ {n_arch} archivo(s) · {total_nuevas} nuevas · {total_existian} ya existían")
+                    invalidar_cache()
                     st.session_state.resultado = None
                     st.rerun()
 
@@ -505,6 +532,7 @@ with st.sidebar:
             if st.button("Borrar todos los registros SISOR", type="primary", use_container_width=True):
                 n_borradas = limpiar_sisor()
                 st.success(f"✅ {n_borradas} registros eliminados. Ahora sube el archivo mensual.")
+                invalidar_cache()
                 st.session_state.resultado = None
                 st.rerun()
 
@@ -535,6 +563,7 @@ with st.sidebar:
                 if total_insertadas > 0 or total_omitidas > 0:
                     n_arch = len(archivos_sisor) - len(errores_sisor)
                     st.success(f"✅ {n_arch} archivo(s) · {total_insertadas} entradas nuevas cargadas")
+                    invalidar_cache()
                     if total_omitidas > 0:
                         fechas_str = ", ".join(
                             pd.to_datetime(f).strftime("%d/%m/%Y")
@@ -590,6 +619,7 @@ with st.sidebar:
                             f"✅ {nuevas_oc} nuevas · {act_oc} actualizadas  "
                             f"({cargadas} de {total_arch} filas · fechas: {f_min} → {f_max})"
                         )
+                        invalidar_cache()
                         st.rerun()
                 except Exception as e:
                     st.error(f"Error cargando OC: {e}")
@@ -602,11 +632,9 @@ with st.sidebar:
         st.markdown("### Reporte para el contador")
 
         def _generar_html_reporte():
-            import re as _re_rpt
-            from comparator import comparar as _comparar
             _df_ofb   = get_facturas_ofb()
             _df_sisor = get_sisor_entradas()
-            _resultado = _comparar(_df_ofb, _df_sisor, {"formato": "db"})
+            _resultado = comparar(_df_ofb, _df_sisor, {"formato": "db"})
             _excl = cargar_exclusiones()
             _rfcs = {k.upper() for k in _excl.keys()} if _excl else set()
             _pend_raw = _resultado["pendientes"]
@@ -634,30 +662,6 @@ with st.sidebar:
             _semana    = get_actividad_semanal(_lunes)
 
             # ── Datos Compras (Bloques 1, 2, 3) ──────────────────────────────
-            _hoy_rpt = date.today()
-
-            def _calc_estado_rpt(f_str):
-                try:
-                    if not f_str:
-                        return "sin_fecha"
-                    f = date.fromisoformat(str(f_str).strip()[:10])
-                    d = (f - _hoy_rpt).days
-                    if d < 0:
-                        return "vencida"
-                    if d <= 7:
-                        return "proxima"
-                    return "a_tiempo"
-                except Exception:
-                    return "sin_fecha"
-
-            def _calc_dias_rpt(f_str):
-                try:
-                    if not f_str:
-                        return None
-                    return (date.fromisoformat(str(f_str).strip()[:10]) - _hoy_rpt).days
-                except Exception:
-                    return None
-
             _oc_det_rpt = get_oc_pendientes()
             _semaforo_stats = None
             _oc_urgentes    = None
@@ -665,8 +669,8 @@ with st.sidebar:
 
             if not _oc_det_rpt.empty:
                 _oc_det_rpt = _oc_det_rpt.copy()
-                _oc_det_rpt["estado_entrega"] = _oc_det_rpt["fecha_entrega"].apply(_calc_estado_rpt)
-                _oc_det_rpt["dias_restantes"] = _oc_det_rpt["fecha_entrega"].apply(_calc_dias_rpt)
+                _oc_det_rpt["estado_entrega"] = _oc_det_rpt["fecha_entrega"].apply(estado_entrega)
+                _oc_det_rpt["dias_restantes"] = _oc_det_rpt["fecha_entrega"].apply(dias_restantes)
                 if "monto_pendiente" not in _oc_det_rpt.columns:
                     _oc_det_rpt["monto_pendiente"] = (_oc_det_rpt["pendiente"] * _oc_det_rpt["costo"]).round(2)
 
@@ -685,7 +689,7 @@ with st.sidebar:
                     _ofb_provs = set(
                         _df_ofb_filt["proveedor"]
                         .fillna("").astype(str).str.upper().str.strip()
-                        .apply(lambda x: _re_rpt.sub(r"\s*\(\d{4}\)\s*$", "", x).strip())
+                        .apply(lambda x: re.sub(r"\s*\(\d{4}\)\s*$", "", x).strip())
                         .tolist()
                     )
                 else:
@@ -761,9 +765,8 @@ with st.sidebar:
             if st.button("Enviar reporte por correo", use_container_width=True, type="primary"):
                 with st.spinner("Generando y enviando reporte..."):
                     try:
-                        import os
                         _html = _generar_html_reporte()
-                        _dest = os.getenv("GMAIL_USER", "luisdarool12@gmail.com")
+                        _dest = os.getenv("GMAIL_USER", "")
                         enviar_reporte(_html, _dest)
                         st.success(f"Reporte enviado a {_dest}")
                     except ValueError as e:
@@ -781,8 +784,7 @@ with st.sidebar:
                         st.error(f"Error generando reporte: {e}")
 
         if st.session_state.get("_html_reporte"):
-            from datetime import date as _date
-            _nombre = f"reporte_oak_{_date.today().isoformat()}.html"
+            _nombre = f"reporte_oak_{date.today().isoformat()}.html"
             st.download_button(
                 label="Descargar archivo HTML",
                 data=st.session_state["_html_reporte"].encode("utf-8"),
@@ -810,10 +812,12 @@ with st.sidebar:
         ("reportes", "📁 Reportes", [
             ("historial", "📊", "Historial"),
             ("exportar", "📥", "Exportar"),
+            ("reporte_mensual", "📅", "Reporte Mensual"),
         ]),
         ("configuracion", "📁 Configuración", [
             ("exclusiones", "⚙️", "Exclusiones"),
             ("gestionar_ofb", "🗑️", "Gestionar OFB"),
+            ("gestionar_oc", "📦", "Gestionar OC"),
         ]),
     ]
 
@@ -875,6 +879,302 @@ if stats_db["db_vacia"]:
             "`SEGUIMIENTO_OC.xlsx`",
             icon="📦",
         )
+    st.stop()
+
+# ─── Módulo Reporte Mensual (accesible sin comparación) ─────────────────────
+
+if st.session_state.get("nav_modulo") == "reporte_mensual":
+    st.markdown("### 📅 Reporte Mensual")
+
+    meses_disp = get_meses_disponibles()
+
+    if not meses_disp:
+        st.info(
+            "Aún no hay datos cargados para generar un reporte mensual. "
+            "Sube el archivo OC y/o el Excel de SISOR para comenzar.",
+            icon="📭",
+        )
+        st.stop()
+
+    etiquetas_m = [m[0] for m in meses_disp]
+    valores_m   = [m[1] for m in meses_disp]
+
+    sel_label = st.selectbox(
+        "Período mensual",
+        etiquetas_m,
+        index=0,
+        key="rm_mes_sel",
+        help="Selecciona el mes para el cual deseas generar el reporte",
+    )
+    mes_val = valores_m[etiquetas_m.index(sel_label)]
+
+    with st.spinner(f"Cargando datos de {sel_label}..."):
+        df_oc_m      = get_oc_del_mes(mes_val)
+        df_recep_m   = get_recepcionadas_del_mes(mes_val)
+        df_pend_m    = get_pendientes_del_mes(mes_val)
+
+    # ── Aplicar exclusiones a los pendientes del mes ──────────────────────────
+    exclusiones_m = cargar_exclusiones()
+    if not df_pend_m.empty and "rfc_emisor" in df_pend_m.columns and exclusiones_m:
+        rfcs_excluidos_m = {k.upper() for k in exclusiones_m.keys()}
+        df_pend_m = df_pend_m[
+            ~df_pend_m["rfc_emisor"].str.upper().isin(rfcs_excluidos_m)
+        ].reset_index(drop=True)
+
+    # ── Asignar familia (derivada de OCs + catálogo manual) ──────────────────
+    indice_familias   = construir_indice_oc(get_oc_historial())
+    familias_manuales = cargar_familias_manuales()
+    if not df_recep_m.empty:
+        df_recep_m = df_recep_m.copy()
+        df_recep_m["familia"] = asignar_familia(df_recep_m, indice_familias, familias_manuales)
+    if not df_pend_m.empty:
+        df_pend_m = df_pend_m.copy()
+        df_pend_m["familia"] = asignar_familia(df_pend_m, indice_familias, familias_manuales)
+
+    # ── Métricas resumen ──────────────────────────────────────────────────────
+    n_oc       = len(df_oc_m)
+    ocs_unicas = int(df_oc_m["oc"].nunique()) if not df_oc_m.empty and "oc" in df_oc_m.columns else 0
+    total_oc   = float(df_oc_m["total"].sum()) if not df_oc_m.empty and "total" in df_oc_m.columns else 0.0
+
+    n_recep     = len(df_recep_m)
+    total_recep = float(df_recep_m["importe"].sum()) if not df_recep_m.empty and "importe" in df_recep_m.columns else 0.0
+    hay_xml     = bool(df_recep_m["match_xml"].any()) if not df_recep_m.empty and "match_xml" in df_recep_m.columns else False
+
+    n_pend_m    = len(df_pend_m)
+    total_pend_m = float(df_pend_m["total"].sum()) if not df_pend_m.empty and "total" in df_pend_m.columns else 0.0
+
+    # % de facturas SAT ingresadas en SISOR
+    total_timbradas = n_recep + n_pend_m
+    pct_ingresadas  = round(n_recep / total_timbradas * 100, 1) if total_timbradas > 0 else 0.0
+    color_pct       = "green" if pct_ingresadas >= 90 else ("amber" if pct_ingresadas >= 70 else "red")
+    pct_label       = f"Se ingresaron {n_recep} de {total_timbradas} facturas timbradas"
+
+    rm_c1, rm_c2, rm_c3, rm_c4, rm_c5 = st.columns(5)
+    with rm_c1:
+        st.markdown(f"""<div class="oak-metric">
+            <div class="ml">OC colocadas (renglones)</div>
+            <div class="mv">{n_oc}</div>
+            <div class="md">{ocs_unicas} OCs únicas</div></div>""",
+            unsafe_allow_html=True)
+    with rm_c2:
+        st.markdown(f"""<div class="oak-metric amber">
+            <div class="ml">Monto total OC</div>
+            <div class="mv" style="font-size:1.3rem">${total_oc:,.2f}</div>
+            <div class="md">comprometido en el mes</div></div>""",
+            unsafe_allow_html=True)
+    with rm_c3:
+        st.markdown(f"""<div class="oak-metric green">
+            <div class="ml">Facturas ingresadas SISOR</div>
+            <div class="mv">{n_recep}</div>
+            <div class="md">{'cotejadas vs XML ✓' if hay_xml else 'sin cotejar vs XML'}</div></div>""",
+            unsafe_allow_html=True)
+    with rm_c4:
+        st.markdown(f"""<div class="oak-metric red">
+            <div class="ml">Timbradas no ingresadas</div>
+            <div class="mv">{n_pend_m}</div>
+            <div class="md">${total_pend_m:,.2f} pendiente</div></div>""",
+            unsafe_allow_html=True)
+    with rm_c5:
+        st.markdown(f"""<div class="oak-metric {color_pct}">
+            <div class="ml">% Facturas recibidas</div>
+            <div class="mv">{pct_ingresadas:.1f}%</div>
+            <div class="md">{pct_label}</div></div>""",
+            unsafe_allow_html=True)
+
+    st.divider()
+
+    # ── Sección A: OC Colocadas ───────────────────────────────────────────────
+    st.markdown("#### 📦 Órdenes de Compra Colocadas en el Mes")
+
+    if df_oc_m.empty:
+        st.info(f"No hay órdenes de compra registradas para {sel_label}.", icon="📭")
+    else:
+        cols_oc_show = {
+            "oc":           st.column_config.NumberColumn("OC #", width="small"),
+            "fecha":        st.column_config.DateColumn("Fecha OC", format="DD/MM/YYYY"),
+            "proveedor":    st.column_config.TextColumn("Proveedor"),
+            "familia":      st.column_config.TextColumn("Familia"),
+            "material":     st.column_config.TextColumn("Material"),
+            "cantidad":     st.column_config.NumberColumn("Cantidad"),
+            "unidad":       st.column_config.TextColumn("Unidad", width="small"),
+            "costo":        st.column_config.NumberColumn("Costo", format="$%.2f"),
+            "moneda":       st.column_config.TextColumn("Moneda", width="small"),
+            "total":        st.column_config.NumberColumn("Total OC", format="$%.2f"),
+            "pendiente":    st.column_config.NumberColumn("Pendiente", format="%.2f"),
+            "fecha_entrega":st.column_config.DateColumn("F. Entrega", format="DD/MM/YYYY"),
+        }
+        cols_disp = [c for c in cols_oc_show if c in df_oc_m.columns]
+        st.dataframe(
+            df_oc_m[cols_disp],
+            column_config={k: v for k, v in cols_oc_show.items() if k in cols_disp},
+            hide_index=True,
+            use_container_width=True,
+            height=min(450, 60 + n_oc * 35),
+        )
+        st.caption(
+            f"**{n_oc}** renglones · **{ocs_unicas}** OCs únicas · "
+            f"Monto total: **${total_oc:,.2f}**"
+        )
+
+    st.divider()
+
+    # ── Sección B: Compras Recepcionadas ──────────────────────────────────────
+    st.markdown("#### ✅ Compras Recepcionadas (ingresadas vs XML)")
+
+    if not hay_xml and not df_recep_m.empty:
+        st.warning(
+            "Las entradas de SISOR no tienen columna UUID — no fue posible ingresar "
+            "contra los XMLs del SAT. Se muestran todas las facturas recepcionadas en SISOR "
+            "para este mes. Para ingreso exacto, exporta SISOR incluyendo la columna UUID.",
+            icon="⚠️",
+        )
+    elif df_recep_m.empty:
+        st.info(f"No hay compras recepcionadas registradas para {sel_label}.", icon="📭")
+
+    if not df_recep_m.empty:
+        cols_rec_show = {
+            "proveedor":     st.column_config.TextColumn("Proveedor"),
+            "familia":       st.column_config.TextColumn("Familia"),
+            "factura":       st.column_config.TextColumn("Folio"),
+            "uuid":          st.column_config.TextColumn("UUID / Folio Fiscal"),
+            "rfc_emisor":    st.column_config.TextColumn("RFC Emisor"),
+            "importe":       st.column_config.NumberColumn("Importe", format="$%.2f"),
+            "fecha_factura": st.column_config.DateColumn("Fecha Factura", format="DD/MM/YYYY"),
+            "fecha_captura": st.column_config.DateColumn("Fecha Captura", format="DD/MM/YYYY"),
+        }
+        cols_rec_disp = [c for c in cols_rec_show if c in df_recep_m.columns]
+        st.dataframe(
+            df_recep_m[cols_rec_disp],
+            column_config={k: v for k, v in cols_rec_show.items() if k in cols_rec_disp},
+            hide_index=True,
+            use_container_width=True,
+            height=min(450, 60 + n_recep * 35),
+        )
+        st.caption(
+            f"**{n_recep}** facturas · "
+            f"Monto total: **${total_recep:,.2f}**"
+            + (" · ✓ Cotejadas vs XML" if hay_xml else " · ⚠️ Sin cotejar vs XML")
+        )
+
+    st.divider()
+
+    # ── Sección C: Facturas timbradas NO ingresadas ───────────────────────────
+    st.markdown("#### ⚠️ Facturas Timbradas en SAT — No Ingresadas en SISOR")
+
+    if df_pend_m.empty:
+        st.success(
+            f"✅ Todas las facturas timbradas del mes fueron ingresadas en SISOR.",
+            icon="✅",
+        )
+    else:
+        if n_pend_m == 1:
+            st.warning(
+                f"Hay **{n_pend_m}** factura timbrada en SAT que no fue ingresada en SISOR "
+                f"(${total_pend_m:,.2f}).",
+                icon="⚠️",
+            )
+        else:
+            st.warning(
+                f"Hay **{n_pend_m}** facturas timbradas en SAT que no fueron ingresadas en SISOR "
+                f"(${total_pend_m:,.2f} total).",
+                icon="⚠️",
+            )
+
+        cols_pend_show = {
+            "proveedor":       st.column_config.TextColumn("Proveedor"),
+            "familia":         st.column_config.TextColumn("Familia"),
+            "rfc_emisor":      st.column_config.TextColumn("RFC Emisor"),
+            "folio":           st.column_config.TextColumn("Folio"),
+            "uuid":            st.column_config.TextColumn("UUID / Folio Fiscal"),
+            "fecha":           st.column_config.DateColumn("Fecha Timbre", format="DD/MM/YYYY"),
+            "total":           st.column_config.NumberColumn("Total", format="$%.2f"),
+            "moneda":          st.column_config.TextColumn("Moneda", width="small"),
+            "dias_pendiente":  st.column_config.NumberColumn("Días pendiente", width="small"),
+        }
+        cols_pend_disp = [c for c in cols_pend_show if c in df_pend_m.columns]
+        st.dataframe(
+            df_pend_m[cols_pend_disp],
+            column_config={k: v for k, v in cols_pend_show.items() if k in cols_pend_disp},
+            hide_index=True,
+            use_container_width=True,
+            height=min(450, 60 + n_pend_m * 35),
+        )
+        st.caption(
+            f"**{n_pend_m}** facturas · Monto: **${total_pend_m:,.2f}** · "
+            "Estas facturas fueron timbradas ante el SAT pero no se registró su recepción en SISOR."
+        )
+
+    st.divider()
+
+    # ── Catálogo manual: asignar familia a proveedores sin OC ────────────────
+    _sin_clasif = set()
+    for _df_f in (df_recep_m, df_pend_m):
+        if not _df_f.empty and "familia" in _df_f.columns:
+            _mask_sc = _df_f["familia"] == SIN_CLASIFICAR
+            for _, _r in _df_f[_mask_sc].iterrows():
+                _prov_sc = str(_r.get("proveedor", "") or "").strip()
+                _rfc_sc  = str(_r.get("rfc_emisor", "") or "").strip().upper()
+                if _prov_sc:
+                    _sin_clasif.add((_prov_sc, _rfc_sc))
+    _sin_clasif = sorted(_sin_clasif)
+
+    if _sin_clasif:
+        with st.expander(f"🏷️ Asignar familias sin clasificar ({len(_sin_clasif)} proveedores)"):
+            st.caption(
+                "Estos proveedores no tienen órdenes de compra en el sistema. "
+                "Asigna una familia manualmente (ej. GASTOS, FLETES, SERVICIOS) y "
+                "quedará guardada en `familias_proveedor.json` para futuros reportes."
+            )
+            _opciones_sc = {
+                (f"{p} · {r}" if r else p): (p, r) for p, r in _sin_clasif
+            }
+            _sel_prov_sc = st.selectbox(
+                "Proveedor", list(_opciones_sc.keys()), key="fam_prov_sel",
+            )
+            _OTRA = "✏️ Otra (escribir)"
+            _sel_fam_sc = st.selectbox(
+                "Familia",
+                familias_disponibles(indice_familias) + [_OTRA],
+                key="fam_fam_sel",
+            )
+            if _sel_fam_sc == _OTRA:
+                _sel_fam_sc = st.text_input(
+                    "Nueva familia", key="fam_fam_txt",
+                ).strip().upper()
+            if st.button(
+                "💾 Guardar asignación", key="fam_guardar",
+                disabled=not _sel_fam_sc,
+            ):
+                _p_sc, _r_sc = _opciones_sc[_sel_prov_sc]
+                _clave_sc = _r_sc if _r_sc else _p_sc
+                _catalogo_sc = dict(familias_manuales)
+                _catalogo_sc[_clave_sc] = {"nombre": _p_sc, "familia": _sel_fam_sc}
+                guardar_familias_manuales(_catalogo_sc)
+                st.success(f"{_p_sc} → {_sel_fam_sc}")
+                st.rerun()
+
+    # ── Botón descargar Excel ─────────────────────────────────────────────────
+    resumen_mensual = {
+        "n_oc":                n_oc,
+        "ocs_unicas":          ocs_unicas,
+        "total_oc":            total_oc,
+        "n_recepcionadas":     n_recep,
+        "total_recepcionadas": total_recep,
+        "n_pendientes":        n_pend_m,
+        "total_pendientes":    total_pend_m,
+        "pct_ingresadas":      pct_ingresadas,
+        "total_timbradas":     total_timbradas,
+    }
+    excel_mensual = exportar_reporte_mensual(df_oc_m, df_recep_m, df_pend_m, sel_label, resumen_mensual)
+    st.download_button(
+        label=f"📥 Descargar Reporte Mensual — {sel_label}",
+        data=excel_mensual,
+        file_name=f"Reporte_Mensual_{mes_val}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+        use_container_width=True,
+    )
+
     st.stop()
 
 # ─── Botón Comparar ───────────────────────────────────────────────────────────
@@ -1014,7 +1314,9 @@ if procesar or st.session_state.resultado:
         "historial":     "📊 Historial",
         "oc":            "📦 Órdenes de Compra",
         "actividad":     "📅 Actividad",
-        "gestionar_ofb": "🗑️ Gestionar OFB",
+        "gestionar_ofb":     "🗑️ Gestionar OFB",
+        "gestionar_oc":      "📦 Gestionar OC",
+        "reporte_mensual":   "📅 Reporte Mensual",
     }
     st.markdown(f"### {_NAV_TITLES.get(_active, '')}")
 
@@ -1323,8 +1625,6 @@ if procesar or st.session_state.resultado:
         if hist_df.empty:
             st.info("Aún no hay historial. El historial se acumula con cada comparación.")
         else:
-            import plotly.graph_objects as go
-
             # Agrupar por día: último run de cada día como valor representativo
             hist_df["_dia"] = hist_df["fecha_run"].dt.date
             chart_df = (
@@ -1512,35 +1812,10 @@ if procesar or st.session_state.resultado:
         df_oc_res = get_oc_resumen_proveedor()
         df_oc_det = get_oc_pendientes()
 
-        # ── Semáforo de entrega ───────────────────────────────────────────────
-        _hoy_oc = date.today()
-
-        def _estado_entrega(fecha_str):
-            try:
-                if not fecha_str:
-                    return "sin_fecha"
-                f = date.fromisoformat(str(fecha_str).strip()[:10])
-                dias = (f - _hoy_oc).days
-                if dias < 0:
-                    return "vencida"
-                if dias <= 7:
-                    return "proxima"
-                return "a_tiempo"
-            except Exception:
-                return "sin_fecha"
-
-        def _dias_restantes_oc(fecha_str):
-            try:
-                if not fecha_str:
-                    return None
-                return (date.fromisoformat(str(fecha_str).strip()[:10]) - _hoy_oc).days
-            except Exception:
-                return None
-
         if not df_oc_det.empty:
             df_oc_det = df_oc_det.copy()
-            df_oc_det["estado_entrega"] = df_oc_det["fecha_entrega"].apply(_estado_entrega)
-            df_oc_det["dias_restantes"] = df_oc_det["fecha_entrega"].apply(_dias_restantes_oc)
+            df_oc_det["estado_entrega"] = df_oc_det["fecha_entrega"].apply(estado_entrega)
+            df_oc_det["dias_restantes"] = df_oc_det["fecha_entrega"].apply(dias_restantes)
 
         if df_oc_res.empty:
             st.info(
@@ -1801,12 +2076,11 @@ if procesar or st.session_state.resultado:
                     st.info("No hay renglones OC pendientes para cruzar.", icon="📦")
                 else:
                     # Normalizar proveedor en OFB (mismo criterio que oc_parser)
-                    import re as _re
                     df_ofb_c = df_ofb_cruce.copy()
                     df_ofb_c["prov_norm"] = (
                         df_ofb_c["proveedor"]
                         .fillna("").astype(str).str.upper().str.strip()
-                        .apply(lambda x: _re.sub(r"\s*\(\d{4}\)\s*$", "", x).strip())
+                        .apply(lambda x: re.sub(r"\s*\(\d{4}\)\s*$", "", x).strip())
                     )
 
                     # Agregar OFB por proveedor normalizado
@@ -2458,5 +2732,143 @@ if procesar or st.session_state.resultado:
             if boton_eliminar and ids_sel:
                 n_eliminadas = eliminar_facturas_ofb(ids_sel)
                 st.success(f"✅ {n_eliminadas} factura(s) eliminada(s) correctamente.")
+                invalidar_cache()
+                st.session_state.resultado = None
+                st.rerun()
+
+    # ── Tab Gestionar OC ─────────────────────────────────────────────────────
+
+    if _active == "gestionar_oc":
+        st.markdown("### 📦 Eliminar Órdenes de Compra")
+        st.info(
+            "Elimina renglones de OC que ya conciliaste manualmente con los encargados de compras. "
+            "La eliminación es **permanente** — solo borra de esta app, no del sistema de compras.",
+            icon="⚠️",
+        )
+
+        df_oc_all = get_oc_todos()
+
+        if df_oc_all.empty:
+            st.warning("No hay Órdenes de Compra en la base de datos.")
+        else:
+            # ── Filtros ───────────────────────────────────────────────────────
+            oc1, oc2, oc3 = st.columns([2, 2, 2])
+            with oc1:
+                provs_oc_g = ["— Todos —"] + sorted(df_oc_all["proveedor"].dropna().unique().tolist())
+                sel_prov_oc_g = st.selectbox("Proveedor", provs_oc_g, key="go_prov")
+            with oc2:
+                sel_estado_oc_g = st.radio(
+                    "Estado",
+                    ["Todas", "Con pendiente", "Completamente facturadas"],
+                    horizontal=True,
+                    key="go_estado",
+                )
+            with oc3:
+                busq_oc_g = st.text_input("Buscar OC#", key="go_oc", placeholder="número de OC")
+
+            # ── Aplicar filtros ───────────────────────────────────────────────
+            df_oc_g = df_oc_all.copy()
+            if sel_prov_oc_g != "— Todos —":
+                df_oc_g = df_oc_g[df_oc_g["proveedor"] == sel_prov_oc_g]
+            if sel_estado_oc_g == "Con pendiente":
+                df_oc_g = df_oc_g[df_oc_g["pendiente"] > 0]
+            elif sel_estado_oc_g == "Completamente facturadas":
+                df_oc_g = df_oc_g[df_oc_g["pendiente"] <= 0]
+            if busq_oc_g.strip():
+                df_oc_g = df_oc_g[
+                    df_oc_g["oc"].astype(str).str.contains(busq_oc_g.strip(), na=False)
+                ]
+
+            n_pend_oc  = int((df_oc_all["pendiente"] > 0).sum())
+            n_comp_oc  = int((df_oc_all["pendiente"] <= 0).sum())
+            st.caption(
+                f"**{len(df_oc_g)}** renglones mostrados de {len(df_oc_all)} totales — "
+                f"🔴 {n_pend_oc} con pendiente · ✅ {n_comp_oc} completamente facturadas"
+            )
+
+            cols_oc_g = [c for c in [
+                "id", "oc", "renglon", "fecha", "proveedor", "familia", "material",
+                "cantidad", "facturado", "pendiente", "unidad", "total",
+                "monto_pendiente", "fecha_entrega",
+            ] if c in df_oc_g.columns]
+
+            df_oc_g_show = df_oc_g[cols_oc_g].copy()
+            df_oc_g_show.insert(0, "Eliminar", False)
+
+            edited_oc_g = st.data_editor(
+                df_oc_g_show,
+                column_config={
+                    "Eliminar":        st.column_config.CheckboxColumn("Eliminar", width="small"),
+                    "id":              st.column_config.NumberColumn("ID", width="small"),
+                    "oc":              st.column_config.NumberColumn("OC#", width="small"),
+                    "renglon":         st.column_config.NumberColumn("Renglon", width="small"),
+                    "fecha":           st.column_config.DateColumn("Fecha OC", format="DD/MM/YYYY"),
+                    "proveedor":       st.column_config.TextColumn("Proveedor"),
+                    "familia":         st.column_config.TextColumn("Familia"),
+                    "material":        st.column_config.TextColumn("Material"),
+                    "cantidad":        st.column_config.NumberColumn("Cantidad"),
+                    "facturado":       st.column_config.NumberColumn("Facturado"),
+                    "pendiente":       st.column_config.NumberColumn("Pendiente"),
+                    "unidad":          st.column_config.TextColumn("Unidad", width="small"),
+                    "total":           st.column_config.NumberColumn("Total $", format="$%.2f"),
+                    "monto_pendiente": st.column_config.NumberColumn("Monto pend. $", format="$%.2f"),
+                    "fecha_entrega":   st.column_config.DateColumn("F. Entrega", format="DD/MM/YYYY"),
+                },
+                disabled=[c for c in cols_oc_g],
+                hide_index=True,
+                use_container_width=True,
+                height=min(500, 60 + len(df_oc_g_show) * 35),
+                key="gestionar_oc_editor",
+            )
+
+            n_sel_oc  = int(edited_oc_g["Eliminar"].sum())
+            ids_sel_oc = (
+                edited_oc_g.loc[edited_oc_g["Eliminar"], "id"].tolist()
+                if n_sel_oc > 0 and "id" in edited_oc_g.columns
+                else []
+            )
+
+            st.divider()
+            ocb1, ocb2, ocb3 = st.columns([2, 2, 2])
+            with ocb1:
+                boton_facturar_oc = st.button(
+                    f"✅ Marcar {n_sel_oc} renglón(es) como facturados",
+                    disabled=n_sel_oc == 0,
+                    use_container_width=True,
+                    key="btn_facturar_oc",
+                )
+            with ocb2:
+                boton_eliminar_oc = st.button(
+                    f"🗑️ Eliminar {n_sel_oc} renglón(es) seleccionado(s)",
+                    type="primary",
+                    disabled=n_sel_oc == 0,
+                    use_container_width=True,
+                    key="btn_eliminar_oc",
+                )
+            with ocb3:
+                if n_sel_oc > 0:
+                    monto_sel_oc = (
+                        edited_oc_g.loc[edited_oc_g["Eliminar"], "total"].sum()
+                        if "total" in edited_oc_g.columns else 0.0
+                    )
+                    st.caption(
+                        f"Seleccionados: **{n_sel_oc}** renglón(es) · "
+                        f"Monto: **${monto_sel_oc:,.2f}**"
+                    )
+
+            if boton_facturar_oc and ids_sel_oc:
+                n_marcados_oc = marcar_oc_facturadas(ids_sel_oc)
+                st.success(
+                    f"✅ {n_marcados_oc} renglón(es) marcado(s) como facturados "
+                    f"(pendiente = 0). Ya no aparecerán en las vistas de pendientes."
+                )
+                invalidar_cache()
+                st.session_state.resultado = None
+                st.rerun()
+
+            if boton_eliminar_oc and ids_sel_oc:
+                n_eliminados_oc = eliminar_oc(ids_sel_oc)
+                st.success(f"✅ {n_eliminados_oc} renglón(es) de OC eliminado(s) correctamente.")
+                invalidar_cache()
                 st.session_state.resultado = None
                 st.rerun()
